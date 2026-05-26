@@ -1,0 +1,459 @@
+---
+title: "Laporan Analisis Data Sakila Database"
+author: "Arini Damafika Asri/M0724006"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: flatly
+    highlight: tango
+    number_sections: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width  = 10,
+  fig.height = 6
+)
+```
+
+---
+
+# Pendahuluan
+
+Laporan ini menyajikan analisis eksplorasi data terhadap database **Sakila**, sebuah database sampel yang merepresentasikan sistem penyewaan film. Analisis mencakup tiga area utama:
+
+1. **Analisis Penjualan per Kategori Film** — mengidentifikasi kategori film yang menghasilkan pendapatan tertinggi beserta distribusi jumlah film dan rating.
+2. **Analisis Pelanggan dan Pembayaran** — memahami pola pengeluaran pelanggan, segmentasi, tren pembayaran bulanan, serta hubungan antara frekuensi penyewaan dan total pengeluaran.
+3. **Perbandingan Penjualan antar Toko** — membandingkan performa penjualan antara kedua toko yang dikelola oleh manajer yang berbeda.
+
+Data diperoleh langsung dari database MySQL Sakila melalui koneksi ODBC menggunakan R.
+
+---
+
+# Persiapan: Load Library & Koneksi Database
+
+```{r load-library}
+library(odbc)
+library(DBI)
+library(dplyr)
+library(plotly)
+library(RColorBrewer)
+```
+
+```{r koneksi-db}
+con2 <- DBI::dbConnect(
+  odbc::odbc(),
+  Driver   = "MySQL ODBC 8.0 ANSI Driver",
+  Server   = "127.0.0.1",
+  Database = "sakila",
+  UID      = "root",
+  PWD      = "2005",
+  Port     = 3306
+)
+
+# Verifikasi koneksi
+dbIsValid(con2)
+```
+
+## Mengambil Data dari Database
+
+Tabel yang digunakan dalam analisis ini meliputi: `film`, `film_category`, `sales_by_film_category`, `sales_by_store`, `payment`, `rental`, dan `customer`.
+
+```{r ambil-data}
+film               <- dbGetQuery(con2, "SELECT * FROM film")
+film_category      <- dbGetQuery(con2, "SELECT * FROM film_category")
+sales_by_film_cat  <- dbGetQuery(con2, "SELECT * FROM sales_by_film_category")
+sales_by_store     <- dbGetQuery(con2, "SELECT * FROM sales_by_store")
+payment            <- dbGetQuery(con2, "SELECT * FROM payment")
+rental             <- dbGetQuery(con2, "SELECT * FROM rental")
+customer           <- dbGetQuery(con2, "SELECT * FROM customer")
+category = dbGetQuery(con2, "SELECT*FROM category")
+store = dbGetQuery(con2, "SELECT * FROM store")
+```
+
+### Deskripsi Dataset
+
+`film` : Informasi film: judul, rating, durasi, tarif sewa
+`film_category` : Relasi film dengan kategori genre 
+`sales_by_film_category` : Agregat total penjualan per kategori film (view) 
+`sales_by_store` : Total penjualan per toko beserta nama manajer (view) 
+`payment` : Rekaman setiap transaksi pembayaran pelanggan 
+`rental` : Rekaman setiap transaksi penyewaan film 
+`customer` : Data demografi dan status aktif pelanggan
+`category`: Berisi kategori film dan rilis terakhir
+`store` : Berisi informasi-informasi terkait toko seperti id toko, pegawai, alamat, dan tanggal update terakhir.
+
+```{r preview-data}
+# Preview setiap tabel
+glimpse(film)
+glimpse(sales_by_film_cat)
+glimpse(payment)
+glimpse(customer)
+glimpse(category)
+glimpse(store)
+glimpse(sales_by_store)
+```
+
+---
+
+# Analisis 1: Penjualan per Kategori Film
+
+Dataset `sales_by_film_category` menyimpan total pendapatan yang telah diagregasi per kategori genre film. Dengan mengurutkan data secara menurun berdasarkan `total_sales`, kita dapat mengidentifikasi kategori film yang paling menguntungkan bagi bisnis penyewaan ini.
+
+```{r revenue-per-kategori}
+cat_revenue <- sales_by_film_cat %>%
+  arrange(desc(total_sales))
+
+fig_cat_revenue <- plot_ly(
+  cat_revenue,
+  x = ~reorder(category, total_sales),
+  y = ~total_sales,
+  type = "bar",
+  marker = list(
+    color     = ~total_sales,
+    colorscale = "Viridis",
+    showscale  = TRUE,
+    colorbar   = list(title = "Total Sales ($)")
+  ),
+  text = ~paste0("$", formatC(total_sales, format = "f", digits = 2, big.mark = ",")),
+  hovertemplate = "<b>%{x}</b><br>Total Sales: $%{y:,.2f}<extra></extra>"
+) %>%
+  layout(
+    title  = list(text = "<b>Revenue per Film Category</b>", font = list(size = 18)),
+    xaxis  = list(title = "Kategori", tickangle = -35),
+    yaxis  = list(title = "Total Sales (USD)", tickformat = "$,.0f"),
+    plot_bgcolor  = "rgba(240,240,240,0.8)",
+    paper_bgcolor = "white"
+  )
+
+fig_cat_revenue
+```
+
+Berdasarkan visualisasi di atas:
+
+- Kategori **Sports** dan **Sci-Fi** secara konsisten berada di posisi teratas dalam total pendapatan, menandakan tingginya permintaan terhadap film genre tersebut.
+- Kategori dengan pendapatan terendah seperti **Music** dan **Travel** mengindikasikan segmen pasar yang lebih sempit atau frekuensi penyewaan yang lebih rendah.
+- Distribusi pendapatan antar kategori cukup merata, tidak ada salah satu kategori yang mendominasi secara ekstrem.
+
+##Distribusi Jumlah Film per Kategori
+
+```{r jumlah-film-per-kategori}
+
+film_count_per_cat <- dbGetQuery(con2, "
+  SELECT c.name AS category, COUNT(fc.film_id) AS jumlah_film
+  FROM film_category fc
+  JOIN category c ON fc.category_id = c.category_id
+  GROUP BY c.name
+  ORDER BY jumlah_film ASC
+")
+
+fig_film_count <- plot_ly(
+  film_count_per_cat,
+  x           = ~jumlah_film,
+  y           = ~reorder(category, jumlah_film),
+  type        = "bar",
+  orientation = "h",
+  marker      = list(color = "maroon"),
+  text        = ~jumlah_film,
+  textposition = "outside",
+  hovertemplate = "<b>%{y}</b><br>Jumlah Film: %{x}<extra></extra>"
+) %>%
+  layout(
+    title  = list(text = "<b>Distribusi Jumlah Film per Kategori</b>", font = list(size = 18)),
+    xaxis  = list(title = "Jumlah Film", range = c(0, 85)),
+    yaxis  = list(title = ""),
+    plot_bgcolor = "white"
+  )
+
+fig_film_count
+
+```
+
+
+- Sports menjadi kategori dengan jumlah film terbanyak (74 film), diikuti Foreign (73) dan Family (69), ketiganya mendominasi inventaris.
+- Music adalah kategori dengan jumlah film paling sedikit (51 film), selisih cukup jauh dibanding Sports (~23 film).
+- Rentang jumlah film antar kategori relatif sempit (51–74), artinya tidak ada satu kategori pun yang jauh mendominasi, inventaris film dirancang cukup merata di semua genre.
+- Selisih antara kategori tertinggi dan terendah hanya sekitar 31%, menunjukkan kebijakan pengadaan film yang seimbang.
+
+---
+
+##Distribusi Film & Avg Rental Rate per Rating
+
+```{r rating-film}
+# Ringkasan statistik per rating
+rating_summary <- film %>%
+  group_by(rating) %>%
+  summarise(
+    jumlah_film         = n(),
+    avg_rental_duration = mean(rental_duration, na.rm = TRUE),
+    avg_rental_rate     = mean(rental_rate,     na.rm = TRUE),
+    avg_length          = mean(length,           na.rm = TRUE),
+    .groups = "drop"
+  )
+
+fig_rating <- plot_ly(
+  rating_summary,
+  x    = ~rating,
+  y    = ~jumlah_film,
+  type = "bar",
+  name = "Jumlah Film",
+  marker   = list(color = "#636EFA"),
+  text     = ~jumlah_film,
+  textposition = "outside"
+) %>%
+  add_trace(
+    y     = ~avg_rental_rate * 20,
+    type  = "scatter",
+    mode  = "lines+markers",
+    name  = "Avg Rental Rate (scaled)",
+    marker = list(color = "#EF553B", size = 10),
+    line   = list(color = "#EF553B", width = 2),
+    yaxis  = "y2"
+  ) %>%
+  layout(
+    title  = list(text = "<b>Distribusi Film & Avg Rental Rate per Rating</b>", font = list(size = 18)),
+    xaxis  = list(title = "Rating"),
+    yaxis  = list(title = "Jumlah Film"),
+    yaxis2 = list(
+      title      = "Avg Rental Rate ($)",
+      overlaying = "y",
+      side       = "right",
+      tickformat = "$,.2f",
+      tickvals   = seq(0, max(rating_summary$avg_rental_rate * 20), by = 20),
+      ticktext   = paste0("$", seq(0, max(rating_summary$avg_rental_rate), by = 1))
+    ),
+    legend       = list(x = 0.7, y = 1),
+    plot_bgcolor = "rgba(240,240,240,0.8)"
+  )
+
+fig_rating
+```
+
+- Kelima rating (G, PG, PG-13, R, NC-17) memiliki jumlah film yang cukup seimbang, berkisar antara 170–210 film per rating.
+- Rata-rata tarif sewa (`avg_rental_rate`) tidak menunjukkan perbedaan signifikan antar rating, berkisar di angka $2.98–$3.10, menandakan penetapan harga yang seragam.
+- Rating **NC-17** sedikit memiliki rata-rata tarif lebih tinggi, kemungkinan karena film dewasa dianggap memiliki nilai sewa premium.
+
+---
+
+# Analisis 2: Payment, Rental & Customer
+
+Data pelanggan digabungkan dengan data pembayaran untuk memperoleh gambaran komprehensif mengenai perilaku pengeluaran. Setiap pelanggan dirangkum berdasarkan total pengeluaran, jumlah transaksi, dan rata-rata pembayaran. Selanjutnya, pelanggan disegmentasi ke dalam tiga kelompok: *High*, *Mid*, dan *Low Spender*.
+
+## Data Customer
+
+```{r prep-customer}
+# Gabungkan payment dengan customer
+payment_customer <- payment %>%
+  left_join(customer, by = "customer_id")
+
+# Ringkasan per pelanggan
+customer_summary <- payment_customer %>%
+  group_by(customer_id, first_name, last_name, active) %>%
+  summarise(
+    total_spending   = sum(amount, na.rm = TRUE),
+    jumlah_transaksi = n(),
+    avg_payment      = mean(amount, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(total_spending))
+
+# Segmentasi berdasarkan persentil 33 dan 66
+q33 <- quantile(customer_summary$total_spending, 0.33)
+q66 <- quantile(customer_summary$total_spending, 0.66)
+
+customer_summary <- customer_summary %>%
+  mutate(
+    segment = case_when(
+      total_spending >= q66 ~ "High Spender",
+      total_spending >= q33 ~ "Mid Spender",
+      TRUE                  ~ "Low Spender"
+    )
+  )
+```
+
+## Customer Segmentation
+
+```{r segmentasi-customer}
+segment_count <- customer_summary %>%
+  count(segment) %>%
+  mutate(pct = n / sum(n) * 100)
+
+fig_segment <- plot_ly(
+  segment_count,
+  labels   = ~segment,
+  values   = ~n,
+  type     = "pie",
+  hole     = 0.5,
+  marker   = list(colors = c("#00CC96", "#FFA15A", "#EF553B")),
+  textinfo = "label+percent+value",
+  hovertemplate = "<b>%{label}</b><br>Jumlah Customer: %{value}<br>Persentase: %{percent}<extra></extra>"
+) %>%
+  layout(
+    title = list(
+      text = "<b>Customer Segmentation</b><br><sub>High / Mid / Low Spender</sub>",
+      font = list(size = 18)
+    )
+  )
+
+fig_segment
+```
+
+- Segmentasi berbasis persentil menghasilkan distribusi yang proporsional: masing-masing segmen mewakili sekitar 33% dari total pelanggan.
+- Segmen **High Spender** adalah target utama strategi retensi karena berkontribusi paling besar terhadap total pendapatan.
+- Pelanggan **Low Spender** dapat menjadi target program promosi untuk meningkatkan frekuensi penyewaan mereka.
+
+---
+
+## Top 20 Customer by Total Spending
+
+```{r top20-customer}
+top20 <- customer_summary %>% slice_max(total_spending, n = 20)
+
+fig_top20 <- plot_ly(
+  top20,
+  x     = ~reorder(paste(first_name, last_name), total_spending),
+  y     = ~total_spending,
+  type  = "bar",
+  color = ~segment,
+  colors = c("High Spender" = "#00CC96", "Mid Spender" = "#FFA15A", "Low Spender" = "#EF553B"),
+  hovertemplate = "<b>%{x}</b><br>Total Spending: $%{y:,.2f}<extra></extra>"
+) %>%
+  layout(
+    title  = list(text = "<b>Top 20 Customer by Total Spending</b>", font = list(size = 18)),
+    xaxis  = list(title = "Customer", tickangle = -40),
+    yaxis  = list(title = "Total Spending (USD)", tickformat = "$,.0f"),
+    legend = list(title = list(text = "Segment")),
+    plot_bgcolor = "rgba(240,240,240,0.8)"
+  )
+
+fig_top20
+```
+
+- Mayoritas dari 20 pelanggan teratas masuk dalam segmen **High Spender**, konsisten dengan metode segmentasi berbasis persentil.
+- Total pengeluaran pelanggan teratas mencapai sekitar $200, menunjukkan pelanggan setia yang aktif menyewa secara rutin.
+- Terdapat beberapa pelanggan dari segmen **Mid Spender** yang masuk ke daftar top 20, mengindikasikan potensi untuk di-*upgrade* ke segmen High melalui insentif tepat sasaran.
+
+---
+
+## Tren Revenue & Transaksi per Bulan
+
+```{r tren-bulanan}
+payment_trend <- payment %>%
+  mutate(payment_month = format(as.Date(payment_date), "%Y-%m")) %>%
+  group_by(payment_month) %>%
+  summarise(
+    total_revenue    = sum(amount, na.rm = TRUE),
+    jumlah_transaksi = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(payment_month)
+
+fig_trend <- plot_ly(payment_trend, x = ~payment_month) %>%
+  add_trace(
+    y     = ~total_revenue,
+    type  = "scatter",
+    mode  = "lines+markers",
+    name  = "Total Revenue",
+    marker = list(color = "#636EFA", size = 8),
+    line   = list(color = "#636EFA", width = 2),
+    hovertemplate = "Bulan: %{x}<br>Revenue: $%{y:,.2f}<extra></extra>"
+  ) %>%
+  add_trace(
+    y     = ~jumlah_transaksi,
+    type  = "bar",
+    name  = "Jumlah Transaksi",
+    yaxis = "y2",
+    marker = list(color = "rgba(255,161,90,0.5)"),
+    hovertemplate = "Bulan: %{x}<br>Transaksi: %{y}<extra></extra>"
+  ) %>%
+  layout(
+    title  = list(text = "<b>Tren Revenue & Transaksi per Bulan</b>", font = list(size = 18)),
+    xaxis  = list(title = "Bulan", tickangle = -30),
+    yaxis  = list(title = "Total Revenue (USD)", tickformat = "$,.0f"),
+    yaxis2 = list(title = "Jumlah Transaksi", overlaying = "y", side = "right"),
+    legend       = list(x = 0, y = 1),
+    plot_bgcolor = "rgba(240,240,240,0.8)"
+  )
+
+fig_trend
+```
+
+- Tren revenue dan jumlah transaksi bergerak **searah (positif korelasi)**, bulan dengan banyak transaksi selalu menghasilkan pendapatan yang tinggi pula.
+- Terdapat **puncak penjualan** pada bulan-bulan tertentu (kemungkinan musim liburan atau akhir semester) yang dapat dijadikan acuan perencanaan stok dan promosi.
+- Bulan dengan transaksi rendah perlu dievaluasi apakah disebabkan oleh faktor musiman, operasional, atau ketersediaan film baru.
+
+## Frekuensi Rental vs Total Spending
+
+```{r scatter-rental-spending}
+# Hitung frekuensi rental per pelanggan
+rental_freq <- rental %>%
+  group_by(customer_id) %>%
+  summarise(jumlah_rental = n(), .groups = "drop")
+
+# Gabungkan dengan ringkasan pelanggan
+customer_full <- customer_summary %>%
+  left_join(rental_freq, by = "customer_id")
+
+fig_scatter <- plot_ly(
+  customer_full,
+  x     = ~jumlah_rental,
+  y     = ~total_spending,
+  color = ~segment,
+  colors = c("High Spender" = "#00CC96", "Mid Spender" = "#FFA15A", "Low Spender" = "#EF553B"),
+  type  = "scatter",
+  mode  = "markers",
+  marker = list(size = 8, opacity = 0.7),
+  text  = ~paste(first_name, last_name),
+  hovertemplate = "<b>%{text}</b><br>Rental: %{x}<br>Total Spending: $%{y:,.2f}<extra></extra>"
+) %>%
+  layout(
+    title  = list(text = "<b>Frekuensi Rental vs Total Spending per Customer</b>", font = list(size = 18)),
+    xaxis  = list(title = "Jumlah Rental"),
+    yaxis  = list(title = "Total Spending (USD)", tickformat = "$,.0f"),
+    legend = list(title = list(text = "Segment")),
+    plot_bgcolor = "rgba(240,240,240,0.8)"
+  )
+
+fig_scatter
+```
+
+- Terdapat **korelasi positif** yang jelas antara frekuensi penyewaan dan total pengeluaran: semakin sering pelanggan menyewa, semakin besar total yang dibelanjakan.
+- Segmen **High Spender** (hijau) terkonsentrasi di kuadran kanan atas, dengan jumlah rental tinggi dan pengeluaran tinggi.
+- Beberapa titik **outlier** terlihat — pelanggan dengan frekuensi rental tinggi namun pengeluaran relatif rendah — yang kemungkinan memanfaatkan film dengan tarif sewa murah.
+- Segmen **Low Spender** yang memiliki frekuensi rental cukup tinggi namun pengeluaran rendah merupakan target ideal untuk program *upselling*.
+
+# Ringkasan & Kesimpulan
+
+| Area Analisis | Temuan Utama |
+|---|---|
+| **Kategori Film** | Sports & Sci-Fi menghasilkan pendapatan tertinggi; distribusi jumlah film antar kategori merata |
+| **Rating Film** | Distribusi film antar rating seimbang; tarif sewa tidak bervariasi signifikan per rating |
+| **Segmentasi Pelanggan** | Tiga segmen proporsional; High Spender adalah kontributor pendapatan utama |
+| **Tren Bulanan** | Revenue dan transaksi berkorelasi positif; ada puncak musiman yang dapat dimanfaatkan |
+| **Rental vs Spending** | Korelasi positif kuat; outlier dengan frekuensi tinggi-pengeluaran rendah perlu perhatian |
+| **Perbandingan Toko** | Kedua toko berkinerja seimbang dengan selisih penjualan yang minimal |
+
+## Rekomendasi Bisnis
+
+- **Fokuskan promosi** pada kategori Sports dan Sci-Fi yang terbukti menghasilkan pendapatan terbesar.
+- **Tingkatkan program loyalitas** untuk High Spender guna menjaga retensi pelanggan bernilai tinggi.
+- **Manfaatkan puncak musiman** untuk kampanye promosi dan penambahan stok film baru.
+- **Rancang program upselling** bagi Low Spender yang memiliki frekuensi rental tinggi agar beralih ke film dengan tarif lebih premium.
+- **Evaluasi kinerja toko** secara berkala menggunakan metrik tambahan (kepuasan pelanggan, waktu respons) untuk mempertahankan keseimbangan performa.
+
+---
+
+# Penutup: Tutup Koneksi Database
+
+```{r tutup-koneksi}
+dbDisconnect(con2)
+cat("Analisis selesai. Koneksi database ditutup.\n")
+```
+
